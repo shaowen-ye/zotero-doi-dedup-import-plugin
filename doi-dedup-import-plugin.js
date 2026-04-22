@@ -7,7 +7,8 @@ DOIDedupImportPlugin = {
   config: {
     saveAttachments: false,
     showSummaryForSingleSuccessfulImport: false,
-    placeholderText: "可粘贴多 DOI 或包含 DOI 的纯文本；按 Enter 导入，Shift+Enter 换行"
+    placeholderText: "可粘贴 DOI、带 DOI 的纯文本，或按 CRITICAL/HIGH/MODERATE 分组；按 Enter 导入，Shift+Enter 换行",
+    relevanceTagPrefix: "relevance:"
   },
 
   init({ id, version, rootURI }) {
@@ -194,42 +195,171 @@ DOIDedupImportPlugin = {
     return cleaned ? cleaned.toLowerCase() : null;
   },
 
-  parseDOIInput(rawText) {
+  normalizeRelevanceLevel(value) {
+    const normalized = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[：:]/g, "")
+      .replace(/[_\-\s]+/g, "");
+
+    const aliases = {
+      critical: "critical",
+      crit: "critical",
+      核心: "critical",
+      关键: "critical",
+      high: "high",
+      高: "high",
+      高相关: "high",
+      moderate: "moderate",
+      medium: "moderate",
+      med: "moderate",
+      中: "moderate",
+      中等: "moderate",
+      中相关: "moderate",
+      low: "low",
+      低: "low",
+      低相关: "low"
+    };
+
+    return aliases[normalized] || null;
+  },
+
+  getRelevancePriority(level) {
+    const priorities = {
+      critical: 4,
+      high: 3,
+      moderate: 2,
+      low: 1
+    };
+    return priorities[level] || 0;
+  },
+
+  chooseStrongerRelevance(left, right) {
+    if (!left) {
+      return right || null;
+    }
+    if (!right) {
+      return left || null;
+    }
+    return this.getRelevancePriority(right) > this.getRelevancePriority(left) ? right : left;
+  },
+
+  detectLineRelevance(line) {
+    const trimmed = String(line || "").trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const exact = this.normalizeRelevanceLevel(trimmed);
+    if (exact) {
+      return exact;
+    }
+
+    for (const separator of ["\t", ",", "，", ";", "；", "|"]) {
+      const parts = trimmed.split(separator).map((part) => part.trim()).filter(Boolean);
+      if (parts.length !== 2) {
+        continue;
+      }
+      const left = this.normalizeRelevanceLevel(parts[0]);
+      const right = this.normalizeRelevanceLevel(parts[1]);
+      if (left) {
+        return left;
+      }
+      if (right) {
+        return right;
+      }
+    }
+
+    return null;
+  },
+
+  extractDOIsFromText(rawText) {
     const identifiers = Zotero.Utilities.extractIdentifiers(rawText || "")
       .filter((entry) => entry.DOI)
       .map((entry) => entry.DOI);
 
-    const fallbackMatches = [];
-    if (!identifiers.length) {
-      const doiRE = /\b(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)?(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)\b/ig;
-      let match;
-      while ((match = doiRE.exec(rawText || ""))) {
-        fallbackMatches.push(match[1]);
+    if (identifiers.length) {
+      return identifiers;
+    }
+
+    const matches = [];
+    const doiRE = /\b(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)?(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)\b/ig;
+    let match;
+    while ((match = doiRE.exec(rawText || ""))) {
+      matches.push(match[1]);
+    }
+    return matches;
+  },
+
+  parseDOIInput(rawText) {
+    const lines = String(rawText || "").split(/\r?\n/);
+    const orderedEntries = [];
+    const orderedDOIs = [];
+    const duplicateInputDOIs = [];
+    const seen = new Map();
+    const relevanceCounts = {
+      critical: 0,
+      high: 0,
+      moderate: 0,
+      low: 0
+    };
+    let extractedCount = 0;
+    let currentRelevance = null;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+
+      const lineDOIs = this.extractDOIsFromText(line);
+      const lineRelevance = this.detectLineRelevance(line);
+
+      if (!lineDOIs.length && lineRelevance) {
+        currentRelevance = lineRelevance;
+        continue;
+      }
+
+      if (!lineDOIs.length) {
+        continue;
+      }
+
+      const appliedRelevance = lineRelevance || currentRelevance;
+      for (const candidate of lineDOIs) {
+        extractedCount += 1;
+        const doi = this.normalizeDOI(candidate);
+        if (!doi) {
+          continue;
+        }
+
+        if (seen.has(doi)) {
+          duplicateInputDOIs.push(doi);
+          seen.get(doi).relevance = this.chooseStrongerRelevance(seen.get(doi).relevance, appliedRelevance);
+          continue;
+        }
+
+        const entry = {
+          doi,
+          relevance: appliedRelevance || null
+        };
+        seen.set(doi, entry);
+        orderedEntries.push(entry);
+        orderedDOIs.push(doi);
       }
     }
 
-    const sequence = identifiers.length ? identifiers : fallbackMatches;
-    const orderedDOIs = [];
-    const duplicateInputDOIs = [];
-    const seen = new Set();
-
-    for (const candidate of sequence) {
-      const doi = this.normalizeDOI(candidate);
-      if (!doi) {
-        continue;
+    for (const entry of orderedEntries) {
+      if (entry.relevance && Object.prototype.hasOwnProperty.call(relevanceCounts, entry.relevance)) {
+        relevanceCounts[entry.relevance] += 1;
       }
-      if (seen.has(doi)) {
-        duplicateInputDOIs.push(doi);
-        continue;
-      }
-      seen.add(doi);
-      orderedDOIs.push(doi);
     }
 
     return {
-      extractedCount: sequence.length,
+      extractedCount,
+      orderedEntries,
       orderedDOIs,
-      duplicateInputDOIs: [...new Set(duplicateInputDOIs)]
+      duplicateInputDOIs: [...new Set(duplicateInputDOIs)],
+      relevanceCounts
     };
   },
 
@@ -367,6 +497,66 @@ DOIDedupImportPlugin = {
     return "linked-to-collection";
   },
 
+  getRelevanceTag(level) {
+    return level ? `${this.config.relevanceTagPrefix}${level}` : null;
+  },
+
+  async ensureRelevanceTag(item, relevance) {
+    if (!relevance) {
+      return "no-relevance";
+    }
+
+    const targetTag = this.getRelevanceTag(relevance);
+    const tags = typeof item.getTags === "function" ? item.getTags() : [];
+    const currentTags = tags.map((entry) => entry.tag);
+    let changed = false;
+    let removedAny = false;
+
+    for (const tag of currentTags) {
+      if (tag.startsWith(this.config.relevanceTagPrefix) && tag !== targetTag) {
+        item.removeTag(tag);
+        changed = true;
+        removedAny = true;
+      }
+    }
+
+    if (!currentTags.includes(targetTag)) {
+      item.addTag(targetTag);
+      changed = true;
+    }
+
+    if (changed) {
+      await item.saveTx();
+      return removedAny ? "retagged" : "tagged";
+    }
+
+    return "already-tagged";
+  },
+
+  incrementRelevanceSummary(summary, relevance, action) {
+    if (!relevance) {
+      return;
+    }
+    if (!["tagged", "retagged", "already-tagged"].includes(action)) {
+      return;
+    }
+    summary.relevanceTaggedCount += 1;
+    summary.relevanceCounts[relevance] = (summary.relevanceCounts[relevance] || 0) + 1;
+  },
+
+  async applyExistingItemActions(item, collectionID, relevance, summary) {
+    const collectionAction = await this.ensureItemInCollection(item, collectionID);
+    const relevanceAction = await this.ensureRelevanceTag(item, relevance);
+    this.incrementRelevanceSummary(summary, relevance, relevanceAction);
+    return { collectionAction, relevanceAction };
+  },
+
+  async applyImportedItemActions(item, relevance, summary) {
+    const relevanceAction = await this.ensureRelevanceTag(item, relevance);
+    this.incrementRelevanceSummary(summary, relevance, relevanceAction);
+    return relevanceAction;
+  },
+
   async importByDOI(doi, libraryID, collectionID) {
     const translate = new Zotero.Translate.Search();
     translate.setIdentifier({ DOI: doi });
@@ -474,13 +664,15 @@ DOIDedupImportPlugin = {
     summary.resultItems.push(item);
   },
 
-  summarizeExistingMatch(summary, doi, existingEntry, action, reason) {
+  summarizeExistingMatch(summary, doi, existingEntry, actions, reason, relevance) {
     summary.existing.push({
       doi,
       itemID: existingEntry.item.id,
       title: existingEntry.title,
-      action,
-      reason
+      collectionAction: actions.collectionAction,
+      relevanceAction: actions.relevanceAction,
+      reason,
+      relevance: relevance || null
     });
   },
 
@@ -507,7 +699,7 @@ DOIDedupImportPlugin = {
     return [...matches.values()];
   },
 
-  async rollbackImportedDuplicate({ index, item, doi, collectionID, summary }) {
+  async rollbackImportedDuplicate({ index, item, doi, collectionID, relevance, summary }) {
     const importedEntry = this.createLibraryEntry(item);
     const matches = this.findExistingMatchesForEntry(index, importedEntry, doi);
     if (!matches.length) {
@@ -518,7 +710,7 @@ DOIDedupImportPlugin = {
     }
 
     const existingEntry = this.choosePreferredExistingEntry(matches, collectionID);
-    const action = await this.ensureItemInCollection(existingEntry.item, collectionID);
+    const actions = await this.applyExistingItemActions(existingEntry.item, collectionID, relevance, summary);
     await Zotero.Items.trashTx([item.id]);
 
     summary.reconciledDuplicateImports.push({
@@ -526,9 +718,10 @@ DOIDedupImportPlugin = {
       importedItemID: item.id,
       importedTitle: importedEntry.title,
       keptItemID: existingEntry.itemID,
-      keptTitle: existingEntry.title
+      keptTitle: existingEntry.title,
+      relevance: relevance || null
     });
-    this.summarizeExistingMatch(summary, doi, existingEntry, action, "post-import-rollback");
+    this.summarizeExistingMatch(summary, doi, existingEntry, actions, "post-import-rollback", relevance);
     this.addResultItem(summary, existingEntry.item);
 
     return {
@@ -547,6 +740,13 @@ DOIDedupImportPlugin = {
       extractedCount: parsed.extractedCount,
       uniqueDOIs: parsed.orderedDOIs.length,
       duplicateInputDOIs: parsed.duplicateInputDOIs,
+      relevanceTaggedCount: 0,
+      relevanceCounts: {
+        critical: 0,
+        high: 0,
+        moderate: 0,
+        low: 0
+      },
       existing: [],
       imported: [],
       reconciledDuplicateImports: [],
@@ -556,12 +756,14 @@ DOIDedupImportPlugin = {
       resultItemIDs: new Set()
     };
 
-    for (const doi of parsed.orderedDOIs) {
+    for (const parsedEntry of parsed.orderedEntries) {
+      const doi = parsedEntry.doi;
+      const relevance = parsedEntry.relevance;
       const doiMatches = index.doiIndex.get(doi) || [];
       if (doiMatches.length) {
         const existingEntry = this.choosePreferredExistingEntry(doiMatches, collectionID);
-        const action = await this.ensureItemInCollection(existingEntry.item, collectionID);
-        this.summarizeExistingMatch(summary, doi, existingEntry, action, "doi");
+        const actions = await this.applyExistingItemActions(existingEntry.item, collectionID, relevance, summary);
+        this.summarizeExistingMatch(summary, doi, existingEntry, actions, "doi", relevance);
         this.addResultItem(summary, existingEntry.item);
         continue;
       }
@@ -573,8 +775,8 @@ DOIDedupImportPlugin = {
 
         if (metadataMatches.length) {
           const existingEntry = this.choosePreferredExistingEntry(metadataMatches, collectionID);
-          const action = await this.ensureItemInCollection(existingEntry.item, collectionID);
-          this.summarizeExistingMatch(summary, doi, existingEntry, action, "title-metadata");
+          const actions = await this.applyExistingItemActions(existingEntry.item, collectionID, relevance, summary);
+          this.summarizeExistingMatch(summary, doi, existingEntry, actions, "title-metadata", relevance);
           this.addResultItem(summary, existingEntry.item);
           continue;
         }
@@ -605,6 +807,7 @@ DOIDedupImportPlugin = {
             item,
             doi,
             collectionID,
+            relevance,
             summary
           });
           if (!reconciliation.kept) {
@@ -612,11 +815,13 @@ DOIDedupImportPlugin = {
           }
 
           const entry = reconciliation.entry;
+          await this.applyImportedItemActions(item, relevance, summary);
           this.addEntryToIndex(index, entry);
           summary.imported.push({
             doi,
             itemID: item.id,
-            title: entry.title
+            title: entry.title,
+            relevance: relevance || null
           });
           this.addResultItem(summary, item);
         }
@@ -636,6 +841,9 @@ DOIDedupImportPlugin = {
     if (summary.failed.length || summary.skipped.length) {
       return true;
     }
+    if (summary.relevanceTaggedCount) {
+      return true;
+    }
     if (summary.existing.length) {
       return true;
     }
@@ -650,6 +858,7 @@ DOIDedupImportPlugin = {
       `目标位置：${summary.collectionName || "当前文库（未选中文件夹）"}`,
       `提取到 DOI：${summary.extractedCount}`,
       `唯一 DOI：${summary.uniqueDOIs}`,
+      `带相关性标签：${summary.relevanceTaggedCount}`,
       `复用已有条目：${summary.existing.length}`,
       `新导入：${summary.imported.length}`,
       `导入后回收重复：${summary.reconciledDuplicateImports.length}`,
@@ -658,15 +867,30 @@ DOIDedupImportPlugin = {
       `输入中重复 DOI：${summary.duplicateInputDOIs.length}`
     ];
 
-    const linked = summary.existing.filter((entry) => entry.action === "linked-to-collection").length;
-    const alreadyInCollection = summary.existing.filter((entry) => entry.action === "already-in-collection").length;
-    const reusedWithoutCollection = summary.existing.filter((entry) => entry.action === "no-target-collection").length;
+    const linked = summary.existing.filter((entry) => entry.collectionAction === "linked-to-collection").length;
+    const alreadyInCollection = summary.existing.filter((entry) => entry.collectionAction === "already-in-collection").length;
+    const reusedWithoutCollection = summary.existing.filter((entry) => entry.collectionAction === "no-target-collection").length;
 
     if (summary.existing.length) {
       lines.push("");
       lines.push(`已有条目中，新增加入目标文件夹：${linked}`);
       lines.push(`已有条目中，本来就在目标文件夹：${alreadyInCollection}`);
       lines.push(`已有条目中，仅复用不移动：${reusedWithoutCollection}`);
+    }
+
+    const relevanceLines = [
+      ["critical", "CRITICAL"],
+      ["high", "HIGH"],
+      ["moderate", "MODERATE"],
+      ["low", "LOW"]
+    ]
+      .filter(([level]) => summary.relevanceCounts[level] > 0)
+      .map(([level, label]) => `${label}：${summary.relevanceCounts[level]}`);
+
+    if (relevanceLines.length) {
+      lines.push("");
+      lines.push("相关性标签：");
+      lines.push(...relevanceLines);
     }
 
     if (summary.skipped.length) {

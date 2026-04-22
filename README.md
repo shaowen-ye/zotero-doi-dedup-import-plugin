@@ -27,7 +27,7 @@ bash build.sh
 
 构建产物会出现在：
 
-- `dist/zotero-doi-dedup-import-plugin-1.1.3.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.0.xpi`
 
 ## 安装
 
@@ -65,6 +65,8 @@ bash build.sh
 - `https://doi.org/...`
 - `doi:10.xxxx/...`
 - 一整段正文里的 DOI 自动提取
+- 按相关性分组的 DOI 列表
+- `DOI<TAB>CRITICAL` 或 `DOI,CRITICAL` 这种结构化格式
 
 例如：
 
@@ -75,6 +77,28 @@ paper: 10.1016/j.scitotenv.2022.156509
 The classic paper is doi:10.1038/nature13022 and another is 10.1126/science.adn0769.
 ```
 
+也支持直接按相关性分组：
+
+```text
+CRITICAL
+10.1007/s11160-025-09985-0
+10.7541/2025.2024.0288
+
+HIGH
+10.1038/s41586-024-08375-z
+10.1126/science.abf0861
+
+MODERATE
+10.1111/brv.13137
+```
+
+导入后会把相关性写成 Zotero tag：
+
+- `relevance:critical`
+- `relevance:high`
+- `relevance:moderate`
+- `relevance:low`
+
 ## 兼容性
 
 - Zotero 7
@@ -84,5 +108,5 @@ The classic paper is doi:10.1038/nature13022 and another is 10.1126/science.adn0
 ## 当前行为说明
 
 - 当前优先支持 DOI 去重；ISBN / PMID / arXiv ID 会继续走 Zotero 原生逻辑
-- 当前不额外提供“自定义标签”输入框，复用已有条目时以“加入当前选中文件夹”为主
+- 当前不额外提供自定义任意标签输入框，但会自动写入 `relevance:*` 相关性标签
 - 默认不抓附件，只导入元数据
