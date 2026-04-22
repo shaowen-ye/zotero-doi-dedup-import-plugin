@@ -1,0 +1,700 @@
+DOIDedupImportPlugin = {
+  id: null,
+  version: null,
+  rootURI: null,
+  initialized: false,
+  windowStates: new WeakMap(),
+  config: {
+    saveAttachments: false,
+    showSummaryForSingleSuccessfulImport: false,
+    placeholderText: "可粘贴多 DOI 或包含 DOI 的纯文本；按 Enter 导入，Shift+Enter 换行"
+  },
+
+  init({ id, version, rootURI }) {
+    if (this.initialized) {
+      return;
+    }
+    this.id = id;
+    this.version = version;
+    this.rootURI = rootURI;
+    this.initialized = true;
+  },
+
+  log(message) {
+    Zotero.debug(`DOI Dedup Import: ${message}`);
+  },
+
+  addToAllWindows() {
+    for (const window of Zotero.getMainWindows()) {
+      if (!window.ZoteroPane) {
+        continue;
+      }
+      this.addToWindow(window);
+    }
+  },
+
+  removeFromAllWindows() {
+    for (const window of Zotero.getMainWindows()) {
+      if (!window.ZoteroPane) {
+        continue;
+      }
+      this.removeFromWindow(window);
+    }
+  },
+
+  addToWindow(window) {
+    if (this.windowStates.has(window)) {
+      return;
+    }
+
+    const lookup = window.Zotero_Lookup;
+    if (!lookup || typeof lookup.addItemsFromIdentifier !== "function") {
+      this.log("Zotero_Lookup is not available in this window");
+      return;
+    }
+
+    const panel = window.document.getElementById("zotero-lookup-panel");
+    const state = {
+      lookup,
+      panel,
+      originalAddItemsFromIdentifier: lookup.addItemsFromIdentifier,
+      originalPlaceholder: null,
+      onPopupShown: null
+    };
+
+    const plugin = this;
+    lookup.addItemsFromIdentifier = async function (textBox, childItem, toggleProgress) {
+      return plugin.handleLookupAddItemsFromIdentifier(window, state, textBox, childItem, toggleProgress);
+    };
+
+    if (panel) {
+      state.onPopupShown = function (event) {
+        if (event.originalTarget && event.originalTarget.id !== "zotero-lookup-panel") {
+          return;
+        }
+        plugin.prepareLookupPanel(window, state);
+      };
+      panel.addEventListener("popupshown", state.onPopupShown);
+    }
+
+    this.windowStates.set(window, state);
+  },
+
+  removeFromWindow(window) {
+    const state = this.windowStates.get(window);
+    if (!state) {
+      return;
+    }
+
+    if (state.lookup && state.originalAddItemsFromIdentifier) {
+      state.lookup.addItemsFromIdentifier = state.originalAddItemsFromIdentifier;
+    }
+
+    if (state.panel && state.onPopupShown) {
+      state.panel.removeEventListener("popupshown", state.onPopupShown);
+    }
+
+    const textBox = window.document.getElementById("zotero-lookup-textbox");
+    if (textBox && state.originalPlaceholder !== null) {
+      if (state.originalPlaceholder) {
+        textBox.setAttribute("placeholder", state.originalPlaceholder);
+      } else {
+        textBox.removeAttribute("placeholder");
+      }
+    }
+
+    this.windowStates.delete(window);
+  },
+
+  prepareLookupPanel(window, state) {
+    const textBox = window.document.getElementById("zotero-lookup-textbox");
+    if (!textBox || !window.Zotero_Lookup || typeof window.Zotero_Lookup.setMultiline !== "function") {
+      return;
+    }
+
+    if (state.originalPlaceholder === null) {
+      state.originalPlaceholder = textBox.getAttribute("placeholder") || "";
+    }
+
+    window.Zotero_Lookup.setMultiline(true);
+    textBox.setAttribute("placeholder", this.config.placeholderText);
+    window.setTimeout(() => {
+      try {
+        textBox.focus();
+      } catch (error) {
+        this.log(`Failed to focus lookup textbox: ${error}`);
+      }
+    }, 0);
+  },
+
+  async handleLookupAddItemsFromIdentifier(window, state, textBox, childItem, toggleProgress) {
+    const original = state.originalAddItemsFromIdentifier;
+    const lookup = state.lookup;
+
+    if (childItem) {
+      return original.call(lookup, textBox, childItem, toggleProgress);
+    }
+
+    const extractedIdentifiers = Zotero.Utilities.extractIdentifiers(textBox.value || "");
+    if (!extractedIdentifiers.length || !extractedIdentifiers.every((entry) => !!entry.DOI)) {
+      return original.call(lookup, textBox, childItem, toggleProgress);
+    }
+
+    const parsed = this.parseDOIInput(textBox.value || "");
+    if (!parsed.orderedDOIs.length) {
+      return original.call(lookup, textBox, childItem, toggleProgress);
+    }
+
+    const target = this.resolveLookupTarget(window);
+    toggleProgress(true);
+
+    try {
+      const summary = await this.processDOIList({
+        libraryID: target.libraryID,
+        collectionID: target.collectionID,
+        parsed
+      });
+
+      if (!summary.resultItems.length && (summary.skipped.length || summary.failed.length)) {
+        this.showSummary(window, summary);
+        return false;
+      }
+
+      if (this.shouldShowSummary(summary)) {
+        this.showSummary(window, summary);
+      }
+
+      return summary.resultItems;
+    } catch (error) {
+      Zotero.logError(error);
+      Zotero.alert(window, "DOI 导入失败", error && error.message ? error.message : String(error));
+      return false;
+    } finally {
+      toggleProgress(false);
+    }
+  },
+
+  resolveLookupTarget(window) {
+    let libraryID = Zotero.Libraries.userLibraryID;
+    let collectionID = null;
+
+    try {
+      libraryID = window.ZoteroPane.getSelectedLibraryID();
+      const collection = window.ZoteroPane.getSelectedCollection();
+      collectionID = collection ? collection.id : null;
+    } catch (error) {
+      this.log(`Unable to resolve selected library/collection: ${error}`);
+    }
+
+    return { libraryID, collectionID };
+  },
+
+  normalizeDOI(value) {
+    const cleaned = Zotero.Utilities.cleanDOI((value || "").trim());
+    return cleaned ? cleaned.toLowerCase() : null;
+  },
+
+  parseDOIInput(rawText) {
+    const identifiers = Zotero.Utilities.extractIdentifiers(rawText || "")
+      .filter((entry) => entry.DOI)
+      .map((entry) => entry.DOI);
+
+    const fallbackMatches = [];
+    if (!identifiers.length) {
+      const doiRE = /\b(?:https?:\/\/(?:dx\.)?doi\.org\/|doi:\s*)?(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)\b/ig;
+      let match;
+      while ((match = doiRE.exec(rawText || ""))) {
+        fallbackMatches.push(match[1]);
+      }
+    }
+
+    const sequence = identifiers.length ? identifiers : fallbackMatches;
+    const orderedDOIs = [];
+    const duplicateInputDOIs = [];
+    const seen = new Set();
+
+    for (const candidate of sequence) {
+      const doi = this.normalizeDOI(candidate);
+      if (!doi) {
+        continue;
+      }
+      if (seen.has(doi)) {
+        duplicateInputDOIs.push(doi);
+        continue;
+      }
+      seen.add(doi);
+      orderedDOIs.push(doi);
+    }
+
+    return {
+      extractedCount: sequence.length,
+      orderedDOIs,
+      duplicateInputDOIs: [...new Set(duplicateInputDOIs)]
+    };
+  },
+
+  normalizeTitle(value) {
+    const stripped = Zotero.Utilities.removeDiacritics((value || "").replace(/<[^>]+>/g, " "));
+    return stripped
+      .toLowerCase()
+      .replace(/[^0-9a-z\u4e00-\u9fff]+/g, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+  },
+
+  normalizeCreatorName(value) {
+    return this.normalizeTitle(value || "");
+  },
+
+  extractYear(value) {
+    const match = String(value || "").match(/\b(1[5-9]\d{2}|20\d{2}|21\d{2})\b/);
+    return match ? match[1] : null;
+  },
+
+  getItemCreatorKeys(item) {
+    const creators = typeof item.getCreators === "function" ? item.getCreators() : [];
+    return creators
+      .map((creator) => this.normalizeCreatorName(creator.lastName || creator.name || creator.firstName || ""))
+      .filter(Boolean);
+  },
+
+  extractPreviewCreatorKeys(preview) {
+    const authors = Array.isArray(preview.author) ? preview.author : [];
+    return authors
+      .map((author) => this.normalizeCreatorName(author.family || author.literal || author.name || author.given || ""))
+      .filter(Boolean);
+  },
+
+  getItemDOIs(item) {
+    const values = new Set();
+    const push = (candidate) => {
+      const direct = this.normalizeDOI(candidate);
+      if (direct) {
+        values.add(direct);
+      }
+      const identifiers = Zotero.Utilities.extractIdentifiers(String(candidate || "")).filter((entry) => entry.DOI);
+      for (const entry of identifiers) {
+        const extracted = this.normalizeDOI(entry.DOI);
+        if (extracted) {
+          values.add(extracted);
+        }
+      }
+    };
+
+    push(item.getField("DOI"));
+    if (typeof item.getExtraField === "function") {
+      push(item.getExtraField("DOI"));
+    }
+    push(item.getField("extra"));
+    push(item.getField("url"));
+
+    return [...values];
+  },
+
+  createLibraryEntry(item) {
+    return {
+      item,
+      itemID: item.id,
+      title: item.getField("title") || "",
+      titleKey: this.normalizeTitle(item.getField("title") || ""),
+      year: this.extractYear(item.getField("date") || ""),
+      creatorKeys: this.getItemCreatorKeys(item),
+      dois: this.getItemDOIs(item)
+    };
+  },
+
+  addEntryToIndex(index, entry) {
+    index.entries.push(entry);
+
+    for (const doi of entry.dois) {
+      if (!index.doiIndex.has(doi)) {
+        index.doiIndex.set(doi, []);
+      }
+      index.doiIndex.get(doi).push(entry);
+    }
+
+    if (entry.titleKey) {
+      if (!index.titleIndex.has(entry.titleKey)) {
+        index.titleIndex.set(entry.titleKey, []);
+      }
+      index.titleIndex.get(entry.titleKey).push(entry);
+    }
+  },
+
+  async buildLibraryIndex(libraryID) {
+    const items = (await Zotero.Items.getAll(libraryID, true, false)) || [];
+    const index = {
+      entries: [],
+      doiIndex: new Map(),
+      titleIndex: new Map()
+    };
+
+    for (const item of items) {
+      if (!item || !item.isRegularItem() || !item.isTopLevelItem()) {
+        continue;
+      }
+      this.addEntryToIndex(index, this.createLibraryEntry(item));
+    }
+
+    return index;
+  },
+
+  choosePreferredExistingEntry(entries, collectionID) {
+    return entries
+      .slice()
+      .sort((a, b) => {
+        const aInTarget = collectionID && a.item.getCollections().includes(collectionID) ? 1 : 0;
+        const bInTarget = collectionID && b.item.getCollections().includes(collectionID) ? 1 : 0;
+        if (aInTarget !== bInTarget) {
+          return bInTarget - aInTarget;
+        }
+        if (a.item.dateAdded !== b.item.dateAdded) {
+          return String(a.item.dateAdded).localeCompare(String(b.item.dateAdded));
+        }
+        return a.item.id - b.item.id;
+      })[0];
+  },
+
+  async ensureItemInCollection(item, collectionID) {
+    if (!collectionID) {
+      return "no-target-collection";
+    }
+    if (item.getCollections().includes(collectionID)) {
+      return "already-in-collection";
+    }
+    item.addToCollection(collectionID);
+    await item.saveTx();
+    return "linked-to-collection";
+  },
+
+  async importByDOI(doi, libraryID, collectionID) {
+    const translate = new Zotero.Translate.Search();
+    translate.setIdentifier({ DOI: doi });
+
+    const translators = await translate.getTranslators();
+    if (!translators || !translators.length) {
+      throw new Error(`没有可用的 DOI translator：${doi}`);
+    }
+
+    translate.setTranslator(translators);
+    return translate.translate({
+      libraryID,
+      collections: collectionID ? [collectionID] : false,
+      saveAttachments: this.config.saveAttachments
+    });
+  },
+
+  async fetchPreviewMetadataByDOI(doi) {
+    try {
+      const response = await Zotero.HTTP.request(
+        "GET",
+        `https://doi.org/${encodeURI(doi)}`,
+        {
+          headers: {
+            Accept: "application/vnd.citationstyles.csl+json"
+          }
+        }
+      );
+      return JSON.parse(response.responseText);
+    } catch (error) {
+      this.log(`DOI preview lookup failed for ${doi}: ${error}`);
+      return null;
+    }
+  },
+
+  createPreviewEntry(doi, preview) {
+    if (!preview) {
+      return null;
+    }
+
+    const title = Array.isArray(preview.title) ? preview.title[0] : preview.title;
+    let year = null;
+
+    if (preview.issued && Array.isArray(preview.issued["date-parts"]) && preview.issued["date-parts"][0]) {
+      year = preview.issued["date-parts"][0][0] ? String(preview.issued["date-parts"][0][0]) : null;
+    }
+
+    return {
+      doi,
+      title: title || "",
+      titleKey: this.normalizeTitle(title || ""),
+      year: year || null,
+      creatorKeys: this.extractPreviewCreatorKeys(preview)
+    };
+  },
+
+  countCreatorOverlap(left, right) {
+    const rightSet = new Set(right);
+    let count = 0;
+    for (const value of left) {
+      if (rightSet.has(value)) {
+        count += 1;
+      }
+    }
+    return count;
+  },
+
+  isMetadataMatch(existingEntry, previewEntry) {
+    if (!previewEntry || !previewEntry.titleKey || existingEntry.titleKey !== previewEntry.titleKey) {
+      return false;
+    }
+
+    if (previewEntry.year && existingEntry.year && previewEntry.year !== existingEntry.year) {
+      return false;
+    }
+
+    const previewCreators = previewEntry.creatorKeys || [];
+    const existingCreators = existingEntry.creatorKeys || [];
+
+    if (previewCreators.length && existingCreators.length) {
+      if (previewCreators[0] === existingCreators[0]) {
+        return true;
+      }
+      return previewEntry.year && existingEntry.year
+        ? this.countCreatorOverlap(previewCreators, existingCreators) > 0
+        : false;
+    }
+
+    return !!(previewEntry.year && existingEntry.year);
+  },
+
+  shouldSkipImportForAmbiguousTitle(previewEntry, titleCandidates) {
+    if (!previewEntry || !previewEntry.titleKey || !titleCandidates.length) {
+      return false;
+    }
+
+    return !previewEntry.year || !previewEntry.creatorKeys.length;
+  },
+
+  addResultItem(summary, item) {
+    if (!item || summary.resultItemIDs.has(item.id)) {
+      return;
+    }
+    summary.resultItemIDs.add(item.id);
+    summary.resultItems.push(item);
+  },
+
+  summarizeExistingMatch(summary, doi, existingEntry, action, reason) {
+    summary.existing.push({
+      doi,
+      itemID: existingEntry.item.id,
+      title: existingEntry.title,
+      action,
+      reason
+    });
+  },
+
+  findExistingMatchesForEntry(index, entry, doi) {
+    const matches = new Map();
+
+    const doiCandidates = new Set([doi, ...(entry.dois || [])].filter(Boolean));
+    for (const doiCandidate of doiCandidates) {
+      const entries = index.doiIndex.get(doiCandidate) || [];
+      for (const existingEntry of entries) {
+        matches.set(existingEntry.itemID, existingEntry);
+      }
+    }
+
+    if (entry.titleKey) {
+      const titleCandidates = index.titleIndex.get(entry.titleKey) || [];
+      for (const existingEntry of titleCandidates) {
+        if (this.isMetadataMatch(existingEntry, entry)) {
+          matches.set(existingEntry.itemID, existingEntry);
+        }
+      }
+    }
+
+    return [...matches.values()];
+  },
+
+  async rollbackImportedDuplicate({ index, item, doi, collectionID, summary }) {
+    const importedEntry = this.createLibraryEntry(item);
+    const matches = this.findExistingMatchesForEntry(index, importedEntry, doi);
+    if (!matches.length) {
+      return {
+        kept: true,
+        entry: importedEntry
+      };
+    }
+
+    const existingEntry = this.choosePreferredExistingEntry(matches, collectionID);
+    const action = await this.ensureItemInCollection(existingEntry.item, collectionID);
+    await Zotero.Items.trashTx([item.id]);
+
+    summary.reconciledDuplicateImports.push({
+      doi,
+      importedItemID: item.id,
+      importedTitle: importedEntry.title,
+      keptItemID: existingEntry.itemID,
+      keptTitle: existingEntry.title
+    });
+    this.summarizeExistingMatch(summary, doi, existingEntry, action, "post-import-rollback");
+    this.addResultItem(summary, existingEntry.item);
+
+    return {
+      kept: false,
+      entry: existingEntry
+    };
+  },
+
+  async processDOIList({ libraryID, collectionID, parsed }) {
+    const index = await this.buildLibraryIndex(libraryID);
+    const collection = collectionID ? Zotero.Collections.get(collectionID) : null;
+    const summary = {
+      libraryID,
+      collectionID,
+      collectionName: collection ? collection.name : "",
+      extractedCount: parsed.extractedCount,
+      uniqueDOIs: parsed.orderedDOIs.length,
+      duplicateInputDOIs: parsed.duplicateInputDOIs,
+      existing: [],
+      imported: [],
+      reconciledDuplicateImports: [],
+      skipped: [],
+      failed: [],
+      resultItems: [],
+      resultItemIDs: new Set()
+    };
+
+    for (const doi of parsed.orderedDOIs) {
+      const doiMatches = index.doiIndex.get(doi) || [];
+      if (doiMatches.length) {
+        const existingEntry = this.choosePreferredExistingEntry(doiMatches, collectionID);
+        const action = await this.ensureItemInCollection(existingEntry.item, collectionID);
+        this.summarizeExistingMatch(summary, doi, existingEntry, action, "doi");
+        this.addResultItem(summary, existingEntry.item);
+        continue;
+      }
+
+      const previewEntry = this.createPreviewEntry(doi, await this.fetchPreviewMetadataByDOI(doi));
+      if (previewEntry && previewEntry.titleKey) {
+        const titleCandidates = index.titleIndex.get(previewEntry.titleKey) || [];
+        const metadataMatches = titleCandidates.filter((entry) => this.isMetadataMatch(entry, previewEntry));
+
+        if (metadataMatches.length) {
+          const existingEntry = this.choosePreferredExistingEntry(metadataMatches, collectionID);
+          const action = await this.ensureItemInCollection(existingEntry.item, collectionID);
+          this.summarizeExistingMatch(summary, doi, existingEntry, action, "title-metadata");
+          this.addResultItem(summary, existingEntry.item);
+          continue;
+        }
+
+        if (this.shouldSkipImportForAmbiguousTitle(previewEntry, titleCandidates)) {
+          summary.skipped.push({
+            doi,
+            title: previewEntry.title,
+            reason: "库内存在同标题条目，但缺少足够元数据安全排除重复，已跳过导入"
+          });
+          continue;
+        }
+      }
+
+      try {
+        const importedItems = await this.importByDOI(doi, libraryID, collectionID);
+        const regularTopLevelItems = (importedItems || []).filter(
+          (item) => item && item.isRegularItem() && item.isTopLevelItem()
+        );
+
+        if (!regularTopLevelItems.length) {
+          throw new Error("translator 没有返回顶层文献条目");
+        }
+
+        for (const item of regularTopLevelItems) {
+          const reconciliation = await this.rollbackImportedDuplicate({
+            index,
+            item,
+            doi,
+            collectionID,
+            summary
+          });
+          if (!reconciliation.kept) {
+            continue;
+          }
+
+          const entry = reconciliation.entry;
+          this.addEntryToIndex(index, entry);
+          summary.imported.push({
+            doi,
+            itemID: item.id,
+            title: entry.title
+          });
+          this.addResultItem(summary, item);
+        }
+      } catch (error) {
+        summary.failed.push({
+          doi,
+          error: error && error.message ? error.message : String(error)
+        });
+      }
+    }
+
+    return summary;
+  },
+
+  shouldShowSummary(summary) {
+    const resultCount = summary.resultItems.length;
+    if (summary.failed.length || summary.skipped.length) {
+      return true;
+    }
+    if (summary.existing.length) {
+      return true;
+    }
+    if (summary.duplicateInputDOIs.length) {
+      return true;
+    }
+    return this.config.showSummaryForSingleSuccessfulImport ? !!resultCount : resultCount > 1;
+  },
+
+  formatSummary(summary) {
+    const lines = [
+      `目标位置：${summary.collectionName || "当前文库（未选中文件夹）"}`,
+      `提取到 DOI：${summary.extractedCount}`,
+      `唯一 DOI：${summary.uniqueDOIs}`,
+      `复用已有条目：${summary.existing.length}`,
+      `新导入：${summary.imported.length}`,
+      `导入后回收重复：${summary.reconciledDuplicateImports.length}`,
+      `保守跳过：${summary.skipped.length}`,
+      `导入失败：${summary.failed.length}`,
+      `输入中重复 DOI：${summary.duplicateInputDOIs.length}`
+    ];
+
+    const linked = summary.existing.filter((entry) => entry.action === "linked-to-collection").length;
+    const alreadyInCollection = summary.existing.filter((entry) => entry.action === "already-in-collection").length;
+    const reusedWithoutCollection = summary.existing.filter((entry) => entry.action === "no-target-collection").length;
+
+    if (summary.existing.length) {
+      lines.push("");
+      lines.push(`已有条目中，新增加入目标文件夹：${linked}`);
+      lines.push(`已有条目中，本来就在目标文件夹：${alreadyInCollection}`);
+      lines.push(`已有条目中，仅复用不移动：${reusedWithoutCollection}`);
+    }
+
+    if (summary.skipped.length) {
+      lines.push("");
+      lines.push("已跳过：");
+      for (const entry of summary.skipped.slice(0, 10)) {
+        lines.push(`${entry.doi} :: ${entry.reason}`);
+      }
+      if (summary.skipped.length > 10) {
+        lines.push(`……还有 ${summary.skipped.length - 10} 条`);
+      }
+    }
+
+    if (summary.failed.length) {
+      lines.push("");
+      lines.push("导入失败：");
+      for (const entry of summary.failed.slice(0, 10)) {
+        lines.push(`${entry.doi} :: ${entry.error}`);
+      }
+      if (summary.failed.length > 10) {
+        lines.push(`……还有 ${summary.failed.length - 10} 条`);
+      }
+    }
+
+    return lines.join("\n");
+  },
+
+  showSummary(window, summary) {
+    Zotero.alert(window, "DOI 去重导入完成", this.formatSummary(summary));
+  }
+};
