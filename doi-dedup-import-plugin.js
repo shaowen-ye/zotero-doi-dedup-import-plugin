@@ -8,7 +8,9 @@ DOIDedupImportPlugin = {
     saveAttachments: false,
     showSummaryForSingleSuccessfulImport: false,
     placeholderText: "可粘贴 DOI、带 DOI 的纯文本，或按 CRITICAL/HIGH/MODERATE 分组；按 Enter 导入，Shift+Enter 换行",
-    relevanceTagPrefix: "relevance:"
+    relevanceTagPrefix: "relevance:",
+    markReusedTitles: true,
+    reusedTitlePrefix: "♻️ "
   },
 
   init({ id, version, rootURI }) {
@@ -533,6 +535,30 @@ DOIDedupImportPlugin = {
     return "already-tagged";
   },
 
+  async ensureReusedTitleMarker(item) {
+    if (!this.config.markReusedTitles) {
+      return "disabled";
+    }
+
+    const prefix = this.config.reusedTitlePrefix || "";
+    if (!prefix) {
+      return "no-marker";
+    }
+
+    const title = item.getField("title") || "";
+    if (!title) {
+      return "no-title";
+    }
+
+    if (title.startsWith(prefix)) {
+      return "already-marked";
+    }
+
+    item.setField("title", `${prefix}${title}`);
+    await item.saveTx();
+    return "title-marked";
+  },
+
   incrementRelevanceSummary(summary, relevance, action) {
     if (!relevance) {
       return;
@@ -547,8 +573,14 @@ DOIDedupImportPlugin = {
   async applyExistingItemActions(item, collectionID, relevance, summary) {
     const collectionAction = await this.ensureItemInCollection(item, collectionID);
     const relevanceAction = await this.ensureRelevanceTag(item, relevance);
+    const titleMarkerAction = await this.ensureReusedTitleMarker(item);
     this.incrementRelevanceSummary(summary, relevance, relevanceAction);
-    return { collectionAction, relevanceAction };
+    if (titleMarkerAction === "title-marked") {
+      summary.reusedTitleMarkedCount += 1;
+    } else if (titleMarkerAction === "already-marked") {
+      summary.reusedTitleAlreadyMarkedCount += 1;
+    }
+    return { collectionAction, relevanceAction, titleMarkerAction };
   },
 
   async applyImportedItemActions(item, relevance, summary) {
@@ -668,9 +700,10 @@ DOIDedupImportPlugin = {
     summary.existing.push({
       doi,
       itemID: existingEntry.item.id,
-      title: existingEntry.title,
+      title: existingEntry.item.getField("title") || existingEntry.title,
       collectionAction: actions.collectionAction,
       relevanceAction: actions.relevanceAction,
+      titleMarkerAction: actions.titleMarkerAction,
       reason,
       relevance: relevance || null
     });
@@ -718,7 +751,7 @@ DOIDedupImportPlugin = {
       importedItemID: item.id,
       importedTitle: importedEntry.title,
       keptItemID: existingEntry.itemID,
-      keptTitle: existingEntry.title,
+      keptTitle: existingEntry.item.getField("title") || existingEntry.title,
       relevance: relevance || null
     });
     this.summarizeExistingMatch(summary, doi, existingEntry, actions, "post-import-rollback", relevance);
@@ -741,6 +774,8 @@ DOIDedupImportPlugin = {
       uniqueDOIs: parsed.orderedDOIs.length,
       duplicateInputDOIs: parsed.duplicateInputDOIs,
       relevanceTaggedCount: 0,
+      reusedTitleMarkedCount: 0,
+      reusedTitleAlreadyMarkedCount: 0,
       relevanceCounts: {
         critical: 0,
         high: 0,
@@ -860,6 +895,7 @@ DOIDedupImportPlugin = {
       `唯一 DOI：${summary.uniqueDOIs}`,
       `带相关性标签：${summary.relevanceTaggedCount}`,
       `复用已有条目：${summary.existing.length}`,
+      `复用条目新增标题标记：${summary.reusedTitleMarkedCount}`,
       `新导入：${summary.imported.length}`,
       `导入后回收重复：${summary.reconciledDuplicateImports.length}`,
       `保守跳过：${summary.skipped.length}`,
@@ -870,12 +906,14 @@ DOIDedupImportPlugin = {
     const linked = summary.existing.filter((entry) => entry.collectionAction === "linked-to-collection").length;
     const alreadyInCollection = summary.existing.filter((entry) => entry.collectionAction === "already-in-collection").length;
     const reusedWithoutCollection = summary.existing.filter((entry) => entry.collectionAction === "no-target-collection").length;
+    const alreadyMarkedTitles = summary.reusedTitleAlreadyMarkedCount || 0;
 
     if (summary.existing.length) {
       lines.push("");
       lines.push(`已有条目中，新增加入目标文件夹：${linked}`);
       lines.push(`已有条目中，本来就在目标文件夹：${alreadyInCollection}`);
       lines.push(`已有条目中，仅复用不移动：${reusedWithoutCollection}`);
+      lines.push(`已有条目中，标题原本已有标记：${alreadyMarkedTitles}`);
     }
 
     const relevanceLines = [

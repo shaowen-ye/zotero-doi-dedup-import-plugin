@@ -1,5 +1,7 @@
 # Zotero DOI Dedup Import Plugin
 
+本仓库 fork 自 [huanongfish/zotero-doi-dedup-import-plugin](https://github.com/huanongfish/zotero-doi-dedup-import-plugin)，并在此基础上继续扩展 DOI 去重导入、标题去重和复用条目标识等功能。
+
 这个插件直接接管 Zotero 自带的“魔术棒”入口：
 
 - `通过标识符添加条目`
@@ -16,6 +18,7 @@
 - 若 DOI 没命中，但通过 DOI 元数据预读发现库内已有同标题同元数据条目，也会复用旧条目
 - 只有在确认库内不存在时，才真正执行 DOI 抓取导入
 - 对同标题但元数据不足以安全排除重复的情况，插件会保守跳过，而不是冒险造重
+- 对复用的已有条目，插件会在标题前添加 `♻️ ` 标记；新导入条目不添加该标记
 
 ## 构建 XPI
 
@@ -27,7 +30,7 @@ bash build.sh
 
 构建产物会出现在：
 
-- `dist/zotero-doi-dedup-import-plugin-1.2.0.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.2.xpi`
 
 ## 安装
 
@@ -109,4 +112,5 @@ MODERATE
 
 - 当前优先支持 DOI 去重；ISBN / PMID / arXiv ID 会继续走 Zotero 原生逻辑
 - 当前不额外提供自定义任意标签输入框，但会自动写入 `relevance:*` 相关性标签
+- 当前会给复用的已有条目标题添加 `♻️ ` 前缀；该行为可在源码 `config.reusedTitlePrefix` 中调整
 - 默认不抓附件，只导入元数据
