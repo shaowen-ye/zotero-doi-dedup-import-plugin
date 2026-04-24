@@ -21,6 +21,7 @@ rm -f "$XPI_PATH"
 cd "$ROOT_DIR"
 zip -r "$XPI_PATH" \
   manifest.json \
+  icons \
   bootstrap.js \
   doi-dedup-import-plugin.js \
   README.md

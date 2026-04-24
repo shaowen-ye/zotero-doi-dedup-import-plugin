@@ -1,5 +1,7 @@
 # Zotero DOI Dedup Import Plugin
 
+![DOI Dedup Import logo](icons/icon-128.png)
+
 本仓库 fork 自 [huanongfish/zotero-doi-dedup-import-plugin](https://github.com/huanongfish/zotero-doi-dedup-import-plugin)，并在此基础上继续扩展 DOI 去重导入、标题去重和复用条目标识等功能。
 
 这个插件直接接管 Zotero 自带的“魔术棒”入口：
@@ -20,6 +22,10 @@
 - 对同标题但元数据不足以安全排除重复的情况，插件会保守跳过，而不是冒险造重
 - 对复用的已有条目，插件会在标题前添加 `♻️ ` 标记；新导入条目不添加该标记
 
+## Logo
+
+插件内置一个“DOI 文献卡片 + 去重复用循环箭头 + 魔术棒星光”的图标，用来表达通过 DOI 导入文献、识别已有条目并复用、避免重复导入的功能。
+
 ## 构建 XPI
 
 在插件目录运行：
@@ -30,7 +36,7 @@ bash build.sh
 
 构建产物会出现在：
 
-- `dist/zotero-doi-dedup-import-plugin-1.2.2.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.3.xpi`
 
 ## 安装
 
