@@ -181,17 +181,19 @@ DOIDedupImportPlugin = {
     label.style.cssText = "pointer-events: none;";
     dragHandle.appendChild(label);
 
-    const resizeHandle = this.createXULElement(document, "box");
+    const resizeHandle = this.createXULElement(document, "resizer");
     resizeHandle.setAttribute("class", "doi-dedup-lookup-resize-handle");
+    resizeHandle.setAttribute("dir", "bottomright");
     resizeHandle.setAttribute("tooltiptext", "拖动调整大小");
     resizeHandle.style.cssText = [
       "width: 18px",
       "height: 18px",
-      "align-self: flex-end",
+      "min-width: 18px",
+      "min-height: 18px",
       "cursor: nwse-resize",
-      "margin: -18px 2px 2px auto",
-      "position: relative",
-      "z-index: 10",
+      "margin-left: auto",
+      "margin-right: 3px",
+      "margin-bottom: 3px",
       "background: linear-gradient(135deg, transparent 0 45%, rgba(0,0,0,0.25) 46% 54%, transparent 55% 100%)"
     ].join(";");
 
@@ -255,7 +257,10 @@ DOIDedupImportPlugin = {
 
   applyLookupPanelSize(panel, textBox, width, height) {
     const normalized = this.normalizeLookupPanelLayout({ width, height });
+    panel.setAttribute("width", String(normalized.width));
+    panel.setAttribute("height", String(normalized.height));
     panel.style.width = `${normalized.width}px`;
+    panel.style.height = `${normalized.height}px`;
     panel.style.minWidth = `${this.config.lookupPanelMinWidth}px`;
     panel.style.minHeight = `${this.config.lookupPanelMinHeight}px`;
     if (typeof panel.sizeTo === "function") {
@@ -267,7 +272,7 @@ DOIDedupImportPlugin = {
     }
 
     const textWidth = Math.max(320, normalized.width - 36);
-    const textHeight = Math.max(96, normalized.height - 112);
+    const textHeight = Math.max(96, normalized.height - 124);
     textBox.style.width = `${textWidth}px`;
     textBox.style.minWidth = `${textWidth}px`;
     textBox.style.height = `${textHeight}px`;
