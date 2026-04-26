@@ -7,7 +7,7 @@ DOIDedupImportPlugin = {
   config: {
     saveAttachments: false,
     showSummaryForSingleSuccessfulImport: false,
-    placeholderText: "可粘贴 DOI、带 DOI 的纯文本，或按 CRITICAL/HIGH/MODERATE 分组；按 Enter 导入，Shift+Enter 换行",
+    placeholderText: "可粘贴 DOI 或带 DOI 的纯文本\n支持 CRITICAL/HIGH/MODERATE 分组\n按 Enter 导入，Shift+Enter 换行",
     relevanceTagPrefix: "relevance:",
     markReusedTitles: true,
     reusedTitlePrefix: "♻️ "

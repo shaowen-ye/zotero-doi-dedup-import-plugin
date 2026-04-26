@@ -157,7 +157,7 @@ MODERATE
 
 安装文件：
 
-- `dist/zotero-doi-dedup-import-plugin-1.2.4.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.5.xpi`
 
 ## 构建 XPI
 
@@ -169,7 +169,7 @@ bash build.sh
 
 构建产物会出现在：
 
-- `dist/zotero-doi-dedup-import-plugin-1.2.4.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.5.xpi`
 
 ## 从源码开发加载
 
