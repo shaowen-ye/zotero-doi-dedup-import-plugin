@@ -10,7 +10,12 @@ DOIDedupImportPlugin = {
     placeholderText: "可粘贴 DOI 或带 DOI 的纯文本\n支持 CRITICAL/HIGH/MODERATE 分组\n按 Enter 导入，Shift+Enter 换行",
     relevanceTagPrefix: "relevance:",
     markReusedTitles: true,
-    reusedTitlePrefix: "♻️ "
+    reusedTitlePrefix: "♻️ ",
+    lookupPanelLayoutPrefKey: "doiDedupImport.lookupPanelLayout",
+    lookupPanelDefaultWidth: 560,
+    lookupPanelDefaultHeight: 260,
+    lookupPanelMinWidth: 420,
+    lookupPanelMinHeight: 190
   },
 
   init({ id, version, rootURI }) {
@@ -62,7 +67,9 @@ DOIDedupImportPlugin = {
       panel,
       originalAddItemsFromIdentifier: lookup.addItemsFromIdentifier,
       originalPlaceholder: null,
-      onPopupShown: null
+      onPopupShown: null,
+      dragHandle: null,
+      resizeHandle: null
     };
 
     const plugin = this;
@@ -97,6 +104,8 @@ DOIDedupImportPlugin = {
       state.panel.removeEventListener("popupshown", state.onPopupShown);
     }
 
+    this.removeLookupPanelControls(state);
+
     const textBox = window.document.getElementById("zotero-lookup-textbox");
     if (textBox && state.originalPlaceholder !== null) {
       if (state.originalPlaceholder) {
@@ -121,6 +130,8 @@ DOIDedupImportPlugin = {
 
     window.Zotero_Lookup.setMultiline(true);
     textBox.setAttribute("placeholder", this.config.placeholderText);
+    this.setupLookupPanelControls(window, state, textBox);
+    this.applySavedLookupPanelLayout(window, state.panel, textBox);
     window.setTimeout(() => {
       try {
         textBox.focus();
@@ -128,6 +139,226 @@ DOIDedupImportPlugin = {
         this.log(`Failed to focus lookup textbox: ${error}`);
       }
     }, 0);
+  },
+
+  createXULElement(document, tagName) {
+    if (typeof document.createXULElement === "function") {
+      return document.createXULElement(tagName);
+    }
+    return document.createElement(tagName);
+  },
+
+  setupLookupPanelControls(window, state, textBox) {
+    const panel = state.panel;
+    if (!panel || state.dragHandle || state.resizeHandle) {
+      return;
+    }
+
+    panel.setAttribute("data-doi-dedup-managed", "true");
+    panel.style.minWidth = `${this.config.lookupPanelMinWidth}px`;
+    panel.style.minHeight = `${this.config.lookupPanelMinHeight}px`;
+
+    const document = window.document;
+    const dragHandle = this.createXULElement(document, "hbox");
+    dragHandle.setAttribute("class", "doi-dedup-lookup-drag-handle");
+    dragHandle.setAttribute("align", "center");
+    dragHandle.setAttribute("pack", "center");
+    dragHandle.setAttribute("tooltiptext", "拖动移动窗口");
+    dragHandle.style.cssText = [
+      "min-height: 22px",
+      "padding: 2px 8px",
+      "cursor: move",
+      "font-size: 12px",
+      "font-weight: 600",
+      "color: #5f6368",
+      "background: rgba(0, 0, 0, 0.04)",
+      "border-bottom: 1px solid rgba(0, 0, 0, 0.10)",
+      "user-select: none"
+    ].join(";");
+
+    const label = this.createXULElement(document, "label");
+    label.setAttribute("value", "DOI 去重导入");
+    label.style.cssText = "pointer-events: none;";
+    dragHandle.appendChild(label);
+
+    const resizeHandle = this.createXULElement(document, "box");
+    resizeHandle.setAttribute("class", "doi-dedup-lookup-resize-handle");
+    resizeHandle.setAttribute("tooltiptext", "拖动调整大小");
+    resizeHandle.style.cssText = [
+      "width: 18px",
+      "height: 18px",
+      "align-self: flex-end",
+      "cursor: nwse-resize",
+      "margin: -18px 2px 2px auto",
+      "position: relative",
+      "z-index: 10",
+      "background: linear-gradient(135deg, transparent 0 45%, rgba(0,0,0,0.25) 46% 54%, transparent 55% 100%)"
+    ].join(";");
+
+    panel.insertBefore(dragHandle, panel.firstChild);
+    panel.appendChild(resizeHandle);
+
+    dragHandle.addEventListener("mousedown", (event) => this.startLookupPanelDrag(window, state, event));
+    resizeHandle.addEventListener("mousedown", (event) => this.startLookupPanelResize(window, state, textBox, event));
+
+    state.dragHandle = dragHandle;
+    state.resizeHandle = resizeHandle;
+  },
+
+  removeLookupPanelControls(state) {
+    if (state.dragHandle && state.dragHandle.parentNode) {
+      state.dragHandle.parentNode.removeChild(state.dragHandle);
+    }
+    if (state.resizeHandle && state.resizeHandle.parentNode) {
+      state.resizeHandle.parentNode.removeChild(state.resizeHandle);
+    }
+    state.dragHandle = null;
+    state.resizeHandle = null;
+  },
+
+  getLookupPanelLayout() {
+    const fallback = {
+      width: this.config.lookupPanelDefaultWidth,
+      height: this.config.lookupPanelDefaultHeight
+    };
+    const value = this.getPrefJSON(this.config.lookupPanelLayoutPrefKey, fallback);
+    return value && typeof value === "object" ? Object.assign({}, fallback, value) : fallback;
+  },
+
+  normalizeLookupPanelLayout(layout) {
+    const width = Math.max(this.config.lookupPanelMinWidth, Math.round(Number(layout.width) || this.config.lookupPanelDefaultWidth));
+    const height = Math.max(this.config.lookupPanelMinHeight, Math.round(Number(layout.height) || this.config.lookupPanelDefaultHeight));
+    const normalized = { width, height };
+    if (Number.isFinite(Number(layout.x)) && Number.isFinite(Number(layout.y))) {
+      normalized.x = Math.round(Number(layout.x));
+      normalized.y = Math.round(Number(layout.y));
+    }
+    return normalized;
+  },
+
+  applySavedLookupPanelLayout(window, panel, textBox) {
+    if (!panel || !textBox) {
+      return;
+    }
+    const layout = this.normalizeLookupPanelLayout(this.getLookupPanelLayout());
+    this.applyLookupPanelSize(panel, textBox, layout.width, layout.height);
+    if (typeof panel.moveTo === "function" && Number.isFinite(layout.x) && Number.isFinite(layout.y)) {
+      window.setTimeout(() => {
+        try {
+          panel.moveTo(layout.x, layout.y);
+        } catch (error) {
+          this.log(`Unable to move lookup panel: ${error}`);
+        }
+      }, 0);
+    }
+  },
+
+  applyLookupPanelSize(panel, textBox, width, height) {
+    const normalized = this.normalizeLookupPanelLayout({ width, height });
+    panel.style.width = `${normalized.width}px`;
+    panel.style.minWidth = `${this.config.lookupPanelMinWidth}px`;
+    panel.style.minHeight = `${this.config.lookupPanelMinHeight}px`;
+    if (typeof panel.sizeTo === "function") {
+      try {
+        panel.sizeTo(normalized.width, normalized.height);
+      } catch (error) {
+        this.log(`Unable to size lookup panel: ${error}`);
+      }
+    }
+
+    const textWidth = Math.max(320, normalized.width - 36);
+    const textHeight = Math.max(96, normalized.height - 112);
+    textBox.style.width = `${textWidth}px`;
+    textBox.style.minWidth = `${textWidth}px`;
+    textBox.style.height = `${textHeight}px`;
+    textBox.style.minHeight = "96px";
+  },
+
+  getLookupPanelScreenRect(window, panel) {
+    const rect = typeof panel.getBoundingClientRect === "function"
+      ? panel.getBoundingClientRect()
+      : { left: 0, top: 0, width: this.config.lookupPanelDefaultWidth, height: this.config.lookupPanelDefaultHeight };
+    const boxObject = panel.boxObject || {};
+    const x = Number.isFinite(panel.screenX) ? panel.screenX
+      : Number.isFinite(boxObject.screenX) ? boxObject.screenX
+        : Math.round((window.mozInnerScreenX || window.screenX || 0) + rect.left);
+    const y = Number.isFinite(panel.screenY) ? panel.screenY
+      : Number.isFinite(boxObject.screenY) ? boxObject.screenY
+        : Math.round((window.mozInnerScreenY || window.screenY || 0) + rect.top);
+    return {
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.round(rect.width || boxObject.width || this.config.lookupPanelDefaultWidth),
+      height: Math.round(rect.height || boxObject.height || this.config.lookupPanelDefaultHeight)
+    };
+  },
+
+  startLookupPanelDrag(window, state, event) {
+    if (event.button !== 0 || !state.panel || typeof state.panel.moveTo !== "function") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+
+    const start = this.getLookupPanelScreenRect(window, state.panel);
+    const startX = event.screenX;
+    const startY = event.screenY;
+
+    const onMove = (moveEvent) => {
+      const x = start.x + (moveEvent.screenX - startX);
+      const y = start.y + (moveEvent.screenY - startY);
+      try {
+        state.panel.moveTo(x, y);
+      } catch (error) {
+        this.log(`Unable to drag lookup panel: ${error}`);
+      }
+    };
+
+    const onUp = () => {
+      window.document.removeEventListener("mousemove", onMove, true);
+      window.document.removeEventListener("mouseup", onUp, true);
+      const current = this.getLookupPanelScreenRect(window, state.panel);
+      const saved = this.normalizeLookupPanelLayout(Object.assign(this.getLookupPanelLayout(), {
+        x: current.x,
+        y: current.y
+      }));
+      this.savePrefJSON(this.config.lookupPanelLayoutPrefKey, saved);
+    };
+
+    window.document.addEventListener("mousemove", onMove, true);
+    window.document.addEventListener("mouseup", onUp, true);
+  },
+
+  startLookupPanelResize(window, state, textBox, event) {
+    if (event.button !== 0 || !state.panel) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+
+    const start = this.getLookupPanelScreenRect(window, state.panel);
+    const startX = event.screenX;
+    const startY = event.screenY;
+
+    const onMove = (moveEvent) => {
+      const width = start.width + (moveEvent.screenX - startX);
+      const height = start.height + (moveEvent.screenY - startY);
+      this.applyLookupPanelSize(state.panel, textBox, width, height);
+    };
+
+    const onUp = () => {
+      window.document.removeEventListener("mousemove", onMove, true);
+      window.document.removeEventListener("mouseup", onUp, true);
+      const current = this.getLookupPanelScreenRect(window, state.panel);
+      const saved = this.normalizeLookupPanelLayout(Object.assign(this.getLookupPanelLayout(), {
+        width: current.width,
+        height: current.height
+      }));
+      this.savePrefJSON(this.config.lookupPanelLayoutPrefKey, saved);
+    };
+
+    window.document.addEventListener("mousemove", onMove, true);
+    window.document.addEventListener("mouseup", onUp, true);
   },
 
   async handleLookupAddItemsFromIdentifier(window, state, textBox, childItem, toggleProgress) {
@@ -954,6 +1185,33 @@ DOIDedupImportPlugin = {
     }
 
     return lines.join("\n");
+  },
+
+  getPrefJSON(prefKey, fallbackValue) {
+    try {
+      if (typeof Zotero.Prefs.prefHasUserValue === "function"
+        && !Zotero.Prefs.prefHasUserValue(prefKey)) {
+        return fallbackValue;
+      }
+
+      const raw = Zotero.Prefs.get(prefKey);
+      if (!raw) {
+        return fallbackValue;
+      }
+
+      return JSON.parse(raw);
+    } catch (error) {
+      this.log(`Unable to read JSON preference ${prefKey}: ${error}`);
+      return fallbackValue;
+    }
+  },
+
+  savePrefJSON(prefKey, value) {
+    try {
+      Zotero.Prefs.set(prefKey, JSON.stringify(value));
+    } catch (error) {
+      this.log(`Unable to save JSON preference ${prefKey}: ${error}`);
+    }
   },
 
   showSummary(window, summary) {

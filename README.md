@@ -14,6 +14,8 @@ Zotero DOI Dedup Import 是一个扩展 Zotero “通过标识符添加条目”
 
 插件直接扩展 Zotero 工具栏中的“通过标识符添加条目”入口，也就是 `输入 ISBN、DOI、PMID、arXiv ID...` 的原生弹窗。安装后，你仍然使用熟悉的魔术棒按钮，但 DOI 输入框会被展开为更适合批量粘贴的多行文本框。
 
+弹窗顶部会显示可拖动区域，右下角带有缩放手柄，可上下左右调整弹窗大小并移动位置。插件会记住上次使用的弹窗位置和大小。
+
 对于非 DOI 输入，例如 ISBN、PMID 或 arXiv ID，插件会保守地交回 Zotero 原生逻辑处理。当前增强功能主要面向 DOI。
 
 ### 多行 DOI 与正文 DOI 提取
@@ -142,6 +144,7 @@ MODERATE
 - `relevanceTagPrefix: "relevance:"`：相关性标签前缀
 - `markReusedTitles: true`：复用已有条目时添加标题标记
 - `reusedTitlePrefix: "♻️ "`：复用条目的标题前缀
+- `lookupPanelLayoutPrefKey: "doiDedupImport.lookupPanelLayout"`：保存弹窗位置和大小
 
 ## Logo
 
@@ -157,7 +160,7 @@ MODERATE
 
 安装文件：
 
-- `dist/zotero-doi-dedup-import-plugin-1.2.5.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.6.xpi`
 
 ## 构建 XPI
 
@@ -169,7 +172,7 @@ bash build.sh
 
 构建产物会出现在：
 
-- `dist/zotero-doi-dedup-import-plugin-1.2.5.xpi`
+- `dist/zotero-doi-dedup-import-plugin-1.2.6.xpi`
 
 ## 从源码开发加载
 
