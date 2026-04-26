@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "DOI Dedup Import",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Deduplicate DOI imports directly inside Zotero's Add Item by Identifier popup.",
   "homepage_url": "https://github.com/shaowen-ye/zotero-doi-dedup-import-plugin",
   "icons": {
@@ -14,7 +14,7 @@
       "id": "doi-dedup-import@plugin.local",
       "update_url": "https://example.com/zotero-doi-dedup-import-plugin/updates.json",
       "strict_min_version": "7.0",
-      "strict_max_version": "8.*"
+      "strict_max_version": "9.*"
     }
   }
 }
